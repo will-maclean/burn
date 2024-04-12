@@ -64,7 +64,6 @@ jobs:
       - publish-burn-common
       - publish-burn-fusion
       - publish-burn-tensor
-      - publish-burn-ndarray
     with:
       crate: burn-jit
     secrets: inherit
