@@ -1,7 +1,7 @@
 #[burn_tensor_testgen::testgen(ad_maxmin)]
 mod tests {
     use super::*;
-    use burn_tensor::Data;
+    use burn_tensor::{Data, Int, Tensor};
 
     #[test]
     fn should_diff_max_dim() {
@@ -47,5 +47,22 @@ mod tests {
         grad_2
             .to_data()
             .assert_approx_eq(&Data::from([[10.0, 8.0], [15.0, 56.0]]), 5);
+    }
+
+    #[test]
+    fn test_max_dim_complex() {
+        let device = Default::default();
+        let a: Vec<f32> = vec![0.0, 0.0];
+        let b = [0, 0];
+        let b: Tensor<TestAutodiffBackend, 2, Int> =
+            Tensor::from_data(Data::from(b.as_slice()), &device).reshape([2, 1]);
+        let a = Tensor::from_data(Data::from(a.as_slice()), &device)
+            .reshape([2, 1])
+            .require_grad();
+
+        let loss = a.gather(1, b);
+        let loss = loss.clone().max_dim(0) + loss; //No panic if this line is commented out
+        let loss = loss.sum();
+        let g = loss.backward();
     }
 }
