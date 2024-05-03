@@ -9,6 +9,7 @@ extern crate derive_new;
 
 extern crate alloc;
 
+mod multi;
 mod tensor;
 
 /// Burn Tensor representaton
