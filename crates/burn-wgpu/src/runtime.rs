@@ -182,9 +182,17 @@ async fn select_adapter<G: GraphicsApi>(_device: &WgpuDevice) -> wgpu::Adapter {
 
 #[cfg(not(target_family = "wasm"))]
 fn select_adapter<G: GraphicsApi>(device: &WgpuDevice) -> wgpu::Adapter {
-    use wgpu::DeviceType;
+    use wgpu::{DeviceType, InstanceFlags};
 
-    let instance = wgpu::Instance::default();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: G::backend().into(),
+        #[cfg(test)]
+        flags: InstanceFlags::debugging(),
+        #[cfg(not(test))]
+        flags: InstanceFlags::empty(),
+        dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        gles_minor_version: wgpu::Gles3MinorVersion::default(),
+    });
     let mut adapters_other = Vec::new();
     let mut adapters = Vec::new();
 
