@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, sync::Arc};
+
 use crate::JitElement;
 
 use super::{
@@ -5,6 +7,8 @@ use super::{
     Procedure, ReadGlobal, ReadGlobalWithLayout, UnaryOperator, Variable, Vectorization,
     WriteGlobal,
 };
+use burn_common::stub::RwLock;
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// The scope is the main [operation](Operation) and [variable](Variable) container that simplify
@@ -28,6 +32,31 @@ pub struct Scope {
     reads_scalar: Vec<(Variable, Variable)>,
     pub layout_ref: Option<Variable>,
     undeclared: u16,
+    #[serde(skip_serializing, skip_deserializing)]
+    map: LaxyProcesureMap,
+}
+
+#[derive(Clone, Default)]
+struct LaxyProcesureMap {
+    map: Arc<RwLock<BTreeMap<u16, Box<dyn LazyProcedure>>>>,
+}
+
+impl LaxyProcesureMap {}
+
+impl core::fmt::Debug for LaxyProcesureMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("")
+    }
+}
+
+impl PartialEq for LaxyProcesureMap {
+    fn eq(&self, other: &Self) -> bool {
+        false
+    }
+}
+
+pub trait LazyProcedure: Send + Sync + 'static {
+    fn expand(&self, scope: &mut Scope, position: Option<Variable>) -> Variable;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -40,6 +69,20 @@ pub enum ReadingStrategy {
 }
 
 impl Scope {
+    fn unroll_lazy(&mut self) {
+        let map = self.map.map.clone();
+        let map = map.read().unwrap();
+
+        if let Some((_, value)) = map.last_key_value() {
+            value.expand(self, None);
+        }
+
+        core::mem::drop(map);
+
+        let mut map = self.map.map.write().unwrap();
+        map.clear();
+    }
+
     /// Create a scope that is at the root of a
     /// [compute shader](crate::codegen::dialect::gpu::ComputeShader).
     ///
@@ -57,6 +100,7 @@ impl Scope {
             reads_scalar: Vec::new(),
             layout_ref: None,
             undeclared: 0,
+            map: LaxyProcesureMap::default(),
         }
     }
 
@@ -205,8 +249,34 @@ impl Scope {
     }
 
     /// Register an [operation](Operation) into the scope.
+    pub(crate) fn register_lazy<F>(&mut self, index: u16, func: F)
+    where
+        F: LazyProcedure,
+    {
+        let mut map = self.map.map.as_ref().write().unwrap();
+        map.insert(index, Box::new(func));
+    }
+
+    /// Register an [operation](Operation) into the scope.
     pub(crate) fn register<T: Into<Operation>>(&mut self, operation: T) {
-        self.operations.push(operation.into())
+        let operation: Operation = operation.into();
+
+        if let Operation::Operator(Operator::Index(op)) = &operation {
+            if let Variable::GlobalInputArray(index, _item) = op.lhs {
+                let inlining_map =
+                    HashMap::<u16, Box<dyn Fn(&mut Scope, Variable) -> Variable>>::new();
+
+                if let Some(expand) = inlining_map.get(&index) {
+                    let position = op.rhs;
+                    let out_expand = expand(self, position);
+                    let out = op.out;
+                    gpu!(self, out = out_expand);
+                    return;
+                }
+            }
+        };
+
+        self.operations.push(operation)
     }
 
     /// Create an empty child scope.
@@ -223,6 +293,7 @@ impl Scope {
             reads_scalar: Vec::new(),
             layout_ref: self.layout_ref,
             undeclared: 0,
+            map: self.map.clone(),
         }
     }
 
@@ -233,6 +304,8 @@ impl Scope {
     /// New operations and variables can be created within the same scope without having name
     /// conflicts.
     pub fn process(&mut self) -> ScopeProcessing {
+        self.unroll_lazy();
+
         self.undeclared += self.locals.len() as u16;
 
         let mut variables = Vec::new();

@@ -1,5 +1,8 @@
 use super::{trace::Trace, Scalars};
-use crate::codegen::dialect::gpu::{self, Operation, Variable};
+use crate::{
+    codegen::dialect::gpu::{self, Operation, Variable},
+    gpu::{LazyProcedure, Scope},
+};
 use burn_tensor::{
     repr::{TensorDescription, TensorId, TensorStatus},
     Element,
@@ -34,6 +37,14 @@ impl TraceBuilder {
     /// Register a [gpu operation](gpu::Operation).
     pub fn register_operation<T: Into<gpu::Operation>>(&mut self, value: T) {
         self.scope.register(value)
+    }
+
+    /// Register an [operation](Operation) into the scope.
+    pub fn register_lazy<F>(&mut self, index: u16, func: F)
+    where
+        F: LazyProcedure,
+    {
+        self.scope.register_lazy(index, func);
     }
 
     /// Create a variable from an input [tensor description](TensorDescription).

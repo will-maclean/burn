@@ -48,7 +48,7 @@ impl<T> Mutex<T> {
 /// This reader-writer lock will block threads waiting for the lock to become available.
 /// The lock can also be statically initialized or created via a [RwLock::new]
 /// [RwLock] wrapper to make `spin::RwLock` API compatible with `std::sync::RwLock` to swap
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RwLock<T> {
     inner: RwLockImported<T>,
 }
