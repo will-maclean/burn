@@ -53,14 +53,21 @@ pub trait Node: Send + Sync {
     fn visit_output(&mut self, output: &TensorId);
     fn reset(&mut self);
     fn all_input_visited(&self) -> bool;
+    fn any_input_visited(&self) -> bool;
     fn any_output_visited(&self) -> bool;
     fn launch_settings(&self) -> LaunchSettings;
     fn register(&self, builder: &mut TraceBuilder);
 }
 
+pub enum MergeSubGraphResult {
+    Merged(SubGraphBoxed),
+    Unable(SubGraphBoxed, SubGraphBoxed),
+}
+
 pub trait SubGraph: Send + Sync {
     fn register(self: Box<Self>, node: NodeBoxed) -> MergingResult;
     fn launch_settings(&self) -> &LaunchSettings;
+    fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult;
 }
 
 #[derive(new)]
@@ -114,6 +121,21 @@ impl SubGraph for TwoNodesSubGraph {
     fn launch_settings(&self) -> &LaunchSettings {
         &self.settings
     }
+
+    fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
+        let (graph_1, other) = match self.graph_1.merge(other) {
+            MergeSubGraphResult::Merged(graph) => return self.graph_2.merge(graph),
+            MergeSubGraphResult::Unable(graph_1, other) => (graph_1, other),
+        };
+
+        match self.graph_2.merge(other) {
+            MergeSubGraphResult::Merged(graph) => return graph.merge(graph_1),
+            MergeSubGraphResult::Unable(graph_2, other) => MergeSubGraphResult::Unable(
+                Box::new(Self::new(graph_1, graph_2, self.settings)),
+                other,
+            ),
+        }
+    }
 }
 
 impl SubGraph for SingleNodeSubGraph {
@@ -147,6 +169,15 @@ impl SubGraph for SingleNodeSubGraph {
     fn launch_settings(&self) -> &LaunchSettings {
         &self.setting
     }
+
+    fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
+        match other.register(self.node) {
+            MergingResult::Fused(graph) => MergeSubGraphResult::Merged(graph),
+            MergingResult::NotFused(graph, node) => {
+                MergeSubGraphResult::Unable(Box::new(Self::new(node, self.setting)), graph)
+            }
+        }
+    }
 }
 
 impl SubGraph for EmptySubGraph {
@@ -157,6 +188,10 @@ impl SubGraph for EmptySubGraph {
 
     fn launch_settings(&self) -> &LaunchSettings {
         &self.setting
+    }
+
+    fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
+        MergeSubGraphResult::Merged(other)
     }
 }
 
@@ -223,6 +258,10 @@ impl Node for FloatAddOp {
         self.inputs.len() == self.inputs_visited.len()
     }
 
+    fn any_input_visited(&self) -> bool {
+        !self.inputs_visited.is_empty()
+    }
+
     fn any_output_visited(&self) -> bool {
         !self.outputs_visited.is_empty()
     }
@@ -269,10 +308,90 @@ pub type SubGraphBoxed = Box<dyn SubGraph>;
 pub type NodeBoxed = Box<dyn Node>;
 
 pub struct GraphBuilder<R: Runtime> {
-    subgraph: SubGraphBoxed,
+    graphs: Vec<SubGraphBoxed>,
+    launch_settings: LaunchSettings,
     status: OptimizationStatus,
     device: R::Device,
     size: usize,
+}
+
+impl<R: Runtime> GraphBuilder<R> {
+    fn add_node(&mut self, node: Box<dyn Node>) {
+        let mut node_current = Some(node);
+        let mut graph_merging_indices = Vec::new();
+        let mut merging_done = false;
+
+        self.graphs = self
+            .graphs
+            .drain(..)
+            .into_iter()
+            .enumerate()
+            .map(|(index, graph)| match node_current.take() {
+                Some(node) => {
+                    if node.any_input_visited() && !merging_done {
+                        // The node is in multiple graphs, we will need to merge them.
+                        graph_merging_indices.push(index);
+                    }
+
+                    match graph.register(node) {
+                        MergingResult::Fused(graph) => {
+                            self.size += 1;
+                            merging_done = true;
+                            graph
+                        }
+                        MergingResult::NotFused(graph, node) => {
+                            self.status = OptimizationStatus::Closed;
+                            node_current = Some(node);
+                            graph
+                        }
+                    }
+                }
+                None => graph,
+            })
+            .collect();
+
+        if !graph_merging_indices.is_empty() {
+            self.merge_subgraphs(graph_merging_indices);
+            return;
+        }
+
+        if let Some(node) = node_current.take() {
+            if self
+                .launch_settings
+                .is_compatible_with(&node.launch_settings())
+            {
+                self.graphs.push(Box::new(SingleNodeSubGraph::new(
+                    node,
+                    self.launch_settings.clone(),
+                )));
+                self.size += 1;
+            }
+        } else {
+            self.status = OptimizationStatus::Closed;
+        }
+    }
+
+    fn merge_subgraphs(&mut self, grads_indices: Vec<usize>) {
+        let mut graphs = Vec::with_capacity(self.graphs.len() - grads_indices.len() + 1);
+        let mut current: Option<SubGraphBoxed> = None;
+
+        for (num, index) in grads_indices.into_iter().enumerate() {
+            let graph = self.graphs.remove(index - num);
+
+            current = match current {
+                Some(graph_current) => match graph_current.merge(graph) {
+                    MergeSubGraphResult::Merged(graph) => Some(graph),
+                    MergeSubGraphResult::Unable(_, _) => panic!("Not handled yet"),
+                },
+                None => Some(graph),
+            };
+        }
+        let graph = current.unwrap();
+        graphs.push(graph);
+
+        self.graphs.drain(..).for_each(|graph| graphs.push(graph));
+        self.graphs = graphs;
+    }
 }
 
 impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
@@ -281,7 +400,7 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
             return;
         }
 
-        let node = match operation {
+        let node: Box<dyn Node> = match operation {
             OperationDescription::NumericFloat(desc) => match desc {
                 burn_tensor::repr::NumericOperationDescription::Add(desc) => {
                     Box::new(FloatAddOp::new(desc.clone()))
@@ -297,19 +416,7 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
             }
         };
 
-        let mut subgraph: SubGraphBoxed = Box::new(EmptySubGraph::default());
-        core::mem::swap(&mut subgraph, &mut self.subgraph);
-
-        self.subgraph = match subgraph.register(node) {
-            MergingResult::Fused(val) => {
-                self.size += 1;
-                val
-            }
-            MergingResult::NotFused(val, _) => {
-                self.status = OptimizationStatus::Closed;
-                val
-            }
-        };
+        self.add_node(node);
     }
 
     fn build(&self) -> JitOptimization<R> {
@@ -318,7 +425,7 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
 
     fn reset(&mut self) {
         self.size = 0;
-        self.subgraph = Box::new(EmptySubGraph::default());
+        self.graphs = vec![Box::new(EmptySubGraph::default())];
     }
 
     fn status(&self) -> burn_fusion::OptimizationStatus {
