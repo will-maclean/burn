@@ -20,29 +20,34 @@ pub enum WorkgroupSizeSettings {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum WorkgroupSettings {
-    Elemwise,
-    ElemwiseShape(Vec<usize>),
+    Elemwise(Vec<usize>),
     Custom,
 }
 
 impl LaunchSettings {
     pub fn is_compatible_with(&self, other: &Self) -> bool {
-        match self.workgroup_size {
-            WorkgroupSizeSettings::Any => match self.workgroup {
-                WorkgroupSettings::Elemwise => return true,
-                _ => return self.workgroup == other.workgroup,
-            },
-            WorkgroupSizeSettings::Fixed(_) => {
-                if self.workgroup_size == other.workgroup_size {
-                    match self.workgroup {
-                        WorkgroupSettings::Elemwise => return true,
-                        _ => return self.workgroup == other.workgroup,
-                    }
+        let workgroup_compatible = self.workgroup == other.workgroup;
+        let workgroup_size_compatible = match self.workgroup_size {
+            WorkgroupSizeSettings::Any => true,
+            WorkgroupSizeSettings::Fixed(workgroup_size) => match other.workgroup_size {
+                WorkgroupSizeSettings::Any => true,
+                WorkgroupSizeSettings::Fixed(workgroup_size_other) => {
+                    workgroup_size == workgroup_size_other
                 }
-            }
-        }
+            },
+        };
 
-        false
+        workgroup_compatible && workgroup_size_compatible
+    }
+
+    pub fn most_restrictive(lhs: Self, rhs: Self) -> Self {
+        match lhs.workgroup_size {
+            WorkgroupSizeSettings::Any => match rhs.workgroup_size {
+                WorkgroupSizeSettings::Any => lhs,
+                WorkgroupSizeSettings::Fixed(_) => rhs,
+            },
+            WorkgroupSizeSettings::Fixed(_) => lhs,
+        }
     }
 }
 
@@ -66,7 +71,6 @@ pub enum MergeSubGraphResult {
 
 pub trait SubGraph: Send + Sync {
     fn register(self: Box<Self>, node: NodeBoxed) -> MergingResult;
-    fn launch_settings(&self) -> &LaunchSettings;
     fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult;
 }
 
@@ -81,20 +85,6 @@ struct TwoNodesSubGraph {
 struct SingleNodeSubGraph {
     node: NodeBoxed,
     setting: LaunchSettings,
-}
-
-#[derive(Default)]
-struct EmptySubGraph {
-    setting: LaunchSettings,
-}
-
-impl Default for LaunchSettings {
-    fn default() -> Self {
-        Self {
-            workgroup_size: WorkgroupSizeSettings::Any,
-            workgroup: WorkgroupSettings::Elemwise,
-        }
-    }
 }
 
 impl SubGraph for TwoNodesSubGraph {
@@ -118,19 +108,15 @@ impl SubGraph for TwoNodesSubGraph {
         }
     }
 
-    fn launch_settings(&self) -> &LaunchSettings {
-        &self.settings
-    }
-
     fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
-        let (graph_1, other) = match self.graph_1.merge(other) {
-            MergeSubGraphResult::Merged(graph) => return self.graph_2.merge(graph),
-            MergeSubGraphResult::Unable(graph_1, other) => (graph_1, other),
+        let (graph_2, other) = match self.graph_2.merge(other) {
+            MergeSubGraphResult::Merged(graph) => return self.graph_1.merge(graph),
+            MergeSubGraphResult::Unable(graph_2, other) => (graph_2, other),
         };
 
-        match self.graph_2.merge(other) {
-            MergeSubGraphResult::Merged(graph) => return graph.merge(graph_1),
-            MergeSubGraphResult::Unable(graph_2, other) => MergeSubGraphResult::Unable(
+        match self.graph_1.merge(other) {
+            MergeSubGraphResult::Merged(graph) => graph.merge(graph_2),
+            MergeSubGraphResult::Unable(graph_1, other) => MergeSubGraphResult::Unable(
                 Box::new(Self::new(graph_1, graph_2, self.settings)),
                 other,
             ),
@@ -166,10 +152,6 @@ impl SubGraph for SingleNodeSubGraph {
         MergingResult::NotFused(self, node)
     }
 
-    fn launch_settings(&self) -> &LaunchSettings {
-        &self.setting
-    }
-
     fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
         match other.register(self.node) {
             MergingResult::Fused(graph) => MergeSubGraphResult::Merged(graph),
@@ -177,21 +159,6 @@ impl SubGraph for SingleNodeSubGraph {
                 MergeSubGraphResult::Unable(Box::new(Self::new(node, self.setting)), graph)
             }
         }
-    }
-}
-
-impl SubGraph for EmptySubGraph {
-    fn register(self: Box<Self>, node: NodeBoxed) -> MergingResult {
-        let settings = node.launch_settings();
-        MergingResult::Fused(Box::new(SingleNodeSubGraph::new(node, settings)))
-    }
-
-    fn launch_settings(&self) -> &LaunchSettings {
-        &self.setting
-    }
-
-    fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult {
-        MergeSubGraphResult::Merged(other)
     }
 }
 
@@ -213,12 +180,13 @@ impl FloatAddOp {
     pub fn new(desc: BinaryOperationDescription) -> Self {
         let inputs = vec![desc.lhs.id.clone(), desc.rhs.id.clone()];
         let outputs = vec![desc.out.id.clone()];
+        let workgroup = WorkgroupSettings::Elemwise(desc.out.shape.clone());
 
         Self {
             desc,
             settings: LaunchSettings {
                 workgroup_size: WorkgroupSizeSettings::Any,
-                workgroup: WorkgroupSettings::Elemwise,
+                workgroup,
             },
             inputs,
             outputs,
@@ -271,9 +239,9 @@ impl Node for FloatAddOp {
     }
 
     fn register(&self, builder: &mut TraceBuilder) {
-        let lhs = builder.input(&self.desc.lhs);
-        let rhs = builder.input(&self.desc.rhs);
-        let out = builder.output(&self.desc.out);
+        let lhs = builder.input(&self.desc.lhs, Variable::Id);
+        let rhs = builder.input(&self.desc.rhs, Variable::Id);
+        let out = builder.output(&self.desc.out, Variable::Id);
 
         struct Proc {
             lhs: Variable,
@@ -317,6 +285,12 @@ pub struct GraphBuilder<R: Runtime> {
 
 impl<R: Runtime> GraphBuilder<R> {
     fn add_node(&mut self, node: Box<dyn Node>) {
+        if self.graphs.is_empty() {
+            let settings = node.launch_settings();
+            self.graphs = vec![Box::new(SingleNodeSubGraph::new(node, settings))];
+            return;
+        }
+
         let mut node_current = Some(node);
         let mut graph_merging_indices = Vec::new();
         let mut merging_done = false;
@@ -356,14 +330,15 @@ impl<R: Runtime> GraphBuilder<R> {
         }
 
         if let Some(node) = node_current.take() {
-            if self
-                .launch_settings
-                .is_compatible_with(&node.launch_settings())
-            {
+            let node_settings = node.launch_settings();
+
+            if self.launch_settings.is_compatible_with(&node_settings) {
                 self.graphs.push(Box::new(SingleNodeSubGraph::new(
                     node,
                     self.launch_settings.clone(),
                 )));
+                self.launch_settings =
+                    LaunchSettings::most_restrictive(self.launch_settings.clone(), node_settings);
                 self.size += 1;
             }
         } else {
@@ -425,7 +400,7 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
 
     fn reset(&mut self) {
         self.size = 0;
-        self.graphs = vec![Box::new(EmptySubGraph::default())];
+        self.graphs = vec![];
     }
 
     fn status(&self) -> burn_fusion::OptimizationStatus {
