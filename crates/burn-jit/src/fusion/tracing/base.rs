@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Scalars {
     pub(crate) num_float: usize,
     pub(crate) num_int: usize,

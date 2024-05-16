@@ -1,10 +1,15 @@
+use std::sync::Arc;
+
 use crate::{
     fusion::{tracing::TraceBuilder, JitOptimization},
     gpu::{gpu, LazyProcedure, Scope, Variable, WorkgroupSize},
     Runtime,
 };
+use burn_common::id::IdGenerator;
 use burn_fusion::{OptimizationBuilder, OptimizationProperties, OptimizationStatus};
 use burn_tensor::repr::{BinaryOperationDescription, OperationDescription, TensorId};
+
+use super::{GraphKernelFactory, GraphOptimization};
 
 #[derive(Clone)]
 pub struct LaunchSettings {
@@ -61,7 +66,7 @@ pub trait Node: Send + Sync {
     fn any_input_visited(&self) -> bool;
     fn any_output_visited(&self) -> bool;
     fn launch_settings(&self) -> LaunchSettings;
-    fn register(&self, builder: &mut TraceBuilder);
+    fn trace(&self, builder: &mut TraceBuilder);
 }
 
 pub enum MergeSubGraphResult {
@@ -72,6 +77,7 @@ pub enum MergeSubGraphResult {
 pub trait SubGraph: Send + Sync {
     fn register(self: Box<Self>, node: NodeBoxed) -> MergingResult;
     fn merge(self: Box<Self>, other: SubGraphBoxed) -> MergeSubGraphResult;
+    fn trace(&self, builder: &mut TraceBuilder);
 }
 
 #[derive(new)]
@@ -122,6 +128,11 @@ impl SubGraph for TwoNodesSubGraph {
             ),
         }
     }
+
+    fn trace(&self, builder: &mut TraceBuilder) {
+        self.graph_1.trace(builder);
+        self.graph_2.trace(builder);
+    }
 }
 
 impl SubGraph for SingleNodeSubGraph {
@@ -159,6 +170,10 @@ impl SubGraph for SingleNodeSubGraph {
                 MergeSubGraphResult::Unable(Box::new(Self::new(node, self.setting)), graph)
             }
         }
+    }
+
+    fn trace(&self, builder: &mut TraceBuilder) {
+        self.node.trace(builder);
     }
 }
 
@@ -238,7 +253,8 @@ impl Node for FloatAddOp {
         self.settings.clone()
     }
 
-    fn register(&self, builder: &mut TraceBuilder) {
+    fn trace(&self, builder: &mut TraceBuilder) {
+        println!("FloatAddOp registering");
         let lhs = builder.input(&self.desc.lhs, Variable::Id);
         let rhs = builder.input(&self.desc.rhs, Variable::Id);
         let out = builder.output(&self.desc.out, Variable::Id);
@@ -253,6 +269,10 @@ impl Node for FloatAddOp {
             fn expand(&self, scope: &mut Scope, position: Option<Variable>) -> Variable {
                 let position = position.unwrap_or(Variable::Id);
 
+                println!("FloatAddOp expand lazy");
+                // let lhs = self.lhs;
+                // let rhs = self.rhs;
+                // let out = self.out;
                 let lhs_input = self.lhs;
                 let rhs_input = self.rhs;
 
@@ -260,8 +280,12 @@ impl Node for FloatAddOp {
                 let rhs = scope.create_local(self.rhs.item());
                 let out = self.out;
 
+                println!("INPUT {lhs_input:?}");
+                // Is local but should not.
                 gpu!(scope, lhs = lhs_input[position]);
                 gpu!(scope, rhs = rhs_input[position]);
+                gpu!(scope, out = lhs + rhs);
+
                 gpu!(scope, out = lhs + rhs);
 
                 out
@@ -277,16 +301,26 @@ pub type NodeBoxed = Box<dyn Node>;
 
 pub struct GraphBuilder<R: Runtime> {
     graphs: Vec<SubGraphBoxed>,
-    launch_settings: LaunchSettings,
+    launch_settings: Option<LaunchSettings>,
     status: OptimizationStatus,
     device: R::Device,
     size: usize,
 }
 
 impl<R: Runtime> GraphBuilder<R> {
+    pub fn new(device: R::Device) -> Self {
+        Self {
+            graphs: Vec::new(),
+            launch_settings: None,
+            status: OptimizationStatus::Open,
+            device,
+            size: 0,
+        }
+    }
     fn add_node(&mut self, node: Box<dyn Node>) {
         if self.graphs.is_empty() {
             let settings = node.launch_settings();
+            println!("First node");
             self.graphs = vec![Box::new(SingleNodeSubGraph::new(node, settings))];
             return;
         }
@@ -332,13 +366,25 @@ impl<R: Runtime> GraphBuilder<R> {
         if let Some(node) = node_current.take() {
             let node_settings = node.launch_settings();
 
-            if self.launch_settings.is_compatible_with(&node_settings) {
+            if let Some(launch_settings) = &self.launch_settings {
+                if launch_settings.is_compatible_with(&node_settings) {
+                    let launch_settings =
+                        LaunchSettings::most_restrictive(launch_settings.clone(), node_settings);
+
+                    self.graphs.push(Box::new(SingleNodeSubGraph::new(
+                        node,
+                        launch_settings.clone(),
+                    )));
+
+                    self.launch_settings = Some(launch_settings);
+                    self.size += 1;
+                }
+            } else {
                 self.graphs.push(Box::new(SingleNodeSubGraph::new(
                     node,
-                    self.launch_settings.clone(),
+                    node_settings.clone(),
                 )));
-                self.launch_settings =
-                    LaunchSettings::most_restrictive(self.launch_settings.clone(), node_settings);
+                self.launch_settings = Some(node_settings);
                 self.size += 1;
             }
         } else {
@@ -391,11 +437,30 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
             }
         };
 
+        println!("Registering op {operation:?}");
         self.add_node(node);
     }
 
     fn build(&self) -> JitOptimization<R> {
-        todo!()
+        let mut builder = TraceBuilder::new();
+
+        for graph in self.graphs.iter() {
+            println!("Trace graph");
+            graph.trace(&mut builder);
+        }
+        println!("Builder");
+
+        let trace = builder.build();
+        let info = Arc::new(trace.compiling());
+
+        let grid = match self.launch_settings.as_ref().unwrap().workgroup_size {
+            WorkgroupSizeSettings::Any => WorkgroupSize::default(),
+            WorkgroupSizeSettings::Fixed(wk) => wk,
+        };
+        let factory = GraphKernelFactory::new(IdGenerator::generate(), info.clone(), grid);
+        let optim = GraphOptimization::new(trace, self.size, self.device.clone(), factory);
+
+        JitOptimization::Graph(optim)
     }
 
     fn reset(&mut self) {
@@ -409,7 +474,7 @@ impl<R: Runtime> OptimizationBuilder<JitOptimization<R>> for GraphBuilder<R> {
 
     fn properties(&self) -> OptimizationProperties {
         OptimizationProperties {
-            ready: true,
+            ready: self.size > 0,
             score: self.size as u64,
         }
     }

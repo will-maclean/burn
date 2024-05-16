@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// captured [tensor operations](burn_tensor::repr::OperationDescription).
 ///
 /// A trace should be built using a [builder](super::TraceBuilder).
-#[derive(new, Clone, Serialize, Deserialize)]
+#[derive(new, Clone, Serialize, Deserialize, Debug)]
 pub struct Trace {
     inputs: Vec<(TensorDescription, gpu::Elem, gpu::Variable)>,
     output_writes: Vec<(TensorDescription, gpu::Elem, gpu::Variable)>,

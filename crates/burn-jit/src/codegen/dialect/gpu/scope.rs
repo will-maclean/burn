@@ -69,7 +69,7 @@ pub enum ReadingStrategy {
 }
 
 impl Scope {
-    fn unroll_lazy(&mut self) {
+    pub fn unroll_lazy(&mut self) {
         let map = self.map.map.clone();
         let map = map.read().unwrap();
 

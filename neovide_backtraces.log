@@ -1,0 +1,21 @@
+2024-05-16 13:52:10 - Neovide panicked with the message 'Could not parse event from neovim: invalid event format for event 'hl_attr_define' - [Integer(PosInt(2335)), Map([(String(Utf8String { s: Ok("bold") }), Boolean(true)), (String(Utf8String { s: Ok("italic") }), Boolean(true)), (String(Utf8String { s: Ok("underline") }), Boolean(true)), (String(Utf8String { s: Ok("foreground") }), Integer(PosInt(9601908))), (String(Utf8String { s: Ok("special") }), Integer(PosInt(10935295)))]), Map([(String(Utf8String { s: Ok("bold") }), Boolean(true)), (String(Utf8String { s: Ok("italic") }), Boolean(true)), (String(Utf8String { s: Ok("underline") }), Boolean(true)), (String(Utf8String { s: Ok("foreground") }), Integer(PosInt(245)))]), Array([Map([(String(Utf8String { s: Ok("kind") }), String(Utf8String { s: Ok("syntax") })), (String(Utf8String { s: Ok("hi_name") }), String(Utf8String { s: Ok("@variable") })), (String(Utf8String { s: Ok("id") }), Integer(PosInt(56)))]), Map([(String(Utf8String { s: Ok("kind") }), String(Utf8String { s: Ok("syntax") })), (String(Utf8String { s: Ok("hi_name") }), String(Utf8String { s: Ok("GruvboxGreenBold") })), (String(Utf8String { s: Ok("id") }), Integer(PosInt(696)))]), Map([(String(Utf8String { s: Ok("kind") }), String(Utf8String { s: Ok("syntax") })), (String(Utf8String { s: Ok("hi_name") }), String(Utf8String { s: Ok("GruvboxGreenBold") })), (String(Utf8String { s: Ok("id") }), Integer(PosInt(696)))]), Map([(String(Utf8String { s: Ok("kind") }), String(Utf8String { s: Ok("syntax") })), (String(Utf8String { s: Ok("hi_name") }), String(Utf8String { s: Ok("Comment") })), (String(Utf8String { s: Ok("id") }), Integer(PosInt(738)))]), Map([(String(Utf8String { s: Ok("kind") }), String(Utf8String { s: Ok("syntax") })), (String(Utf8String { s: Ok("hi_name") }), String(Utf8String { s: Err(([68, 105, 97, 103, 110, 111, 115, 116, 105, 99, 85, 110, 100, 101, 114, 108, 105, 110, 148, 1, 205, 45, 134], Utf8Error { valid_up_to: 18, error_len: Some(1) })) })), (Nil, Integer(PosInt(5)))])])] - invalid event format Invalid highlight info format'. (File: src/error_handling.rs; Line: 20, Column: 5)
+   0: <unknown>
+   1: <unknown>
+   2: <unknown>
+   3: <unknown>
+   4: <unknown>
+   5: <unknown>
+   6: <unknown>
+   7: <unknown>
+   8: <unknown>
+   9: <unknown>
+  10: <unknown>
+  11: <unknown>
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+

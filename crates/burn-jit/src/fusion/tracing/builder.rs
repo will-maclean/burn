@@ -49,6 +49,7 @@ impl TraceBuilder {
 
     /// Create a variable from an input [tensor description](TensorDescription).
     pub fn input(&mut self, tensor: &TensorDescription, position: Variable) -> gpu::Variable {
+        println!("Input {tensor:?}");
         let already_exists = self.tensors.contains_key(&tensor.id);
         let elem = tensor.dtype.into();
 
@@ -86,6 +87,7 @@ impl TraceBuilder {
 
     /// Create a variable from an output [tensor description](TensorDescription).
     pub fn output(&mut self, tensor: &TensorDescription, position: Variable) -> gpu::Variable {
+        println!("output {tensor:?}");
         let elem = tensor.dtype.into();
         // Update the tensor description to the new version.
         self.tensors
@@ -137,7 +139,9 @@ impl TraceBuilder {
     }
 
     /// Build the [trace](Trace).
-    pub fn build(self) -> Trace {
+    pub fn build(mut self) -> Trace {
+        self.scope.unroll_lazy();
+
         let inputs = self.input_descriptions();
         let outputs = self.output_descriptions();
         let locals = outputs
