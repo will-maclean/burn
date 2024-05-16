@@ -17,7 +17,7 @@ pub struct TraceBuilder {
     inputs: Vec<(TensorDescription, Variable)>,
     // Each output tensor id with the output variable index created by the operation.
     output_to_local: HashMap<TensorId, u16>,
-    tensors: HashMap<TensorId, (TensorDescription, gpu::Elem)>,
+    tensors: HashMap<TensorId, (TensorDescription, gpu::Elem, Variable)>,
     scalars: Scalars,
     scope: gpu::Scope,
 }
@@ -48,7 +48,7 @@ impl TraceBuilder {
     }
 
     /// Create a variable from an input [tensor description](TensorDescription).
-    pub fn input(&mut self, tensor: &TensorDescription) -> gpu::Variable {
+    pub fn input(&mut self, tensor: &TensorDescription, position: Variable) -> gpu::Variable {
         let already_exists = self.tensors.contains_key(&tensor.id);
         let elem = tensor.dtype.into();
 
@@ -58,7 +58,7 @@ impl TraceBuilder {
                 let index = self.inputs.len() as u16;
                 let item = gpu::Item::Scalar(elem);
 
-                let local = self.scope.read_array(index, item);
+                let local = self.scope.read_array(index, item, position);
                 self.inputs.push((tensor.clone(), local));
                 local
             }
@@ -78,16 +78,18 @@ impl TraceBuilder {
         };
 
         // Update the tensor description with the new version.
-        self.tensors.insert(tensor.id, (tensor.clone(), elem));
+        self.tensors
+            .insert(tensor.id, (tensor.clone(), elem, position));
 
         variable
     }
 
     /// Create a variable from an output [tensor description](TensorDescription).
-    pub fn output(&mut self, tensor: &TensorDescription) -> gpu::Variable {
+    pub fn output(&mut self, tensor: &TensorDescription, position: Variable) -> gpu::Variable {
         let elem = tensor.dtype.into();
         // Update the tensor description to the new version.
-        self.tensors.insert(tensor.id, (tensor.clone(), elem));
+        self.tensors
+            .insert(tensor.id, (tensor.clone(), elem, position));
 
         // Output already registered as a local variable.
         if let Some(index) = self.output_to_local.get(&tensor.id) {
@@ -146,7 +148,7 @@ impl TraceBuilder {
         Trace::new(inputs, outputs, locals, self.scalars, self.scope)
     }
 
-    fn input_descriptions(&self) -> Vec<(TensorDescription, gpu::Elem)> {
+    fn input_descriptions(&self) -> Vec<(TensorDescription, gpu::Elem, Variable)> {
         self.inputs
             .iter()
             .map(|(input, _local)| {
@@ -156,7 +158,7 @@ impl TraceBuilder {
             .collect::<Vec<_>>()
     }
 
-    fn output_descriptions(&self) -> Vec<(TensorDescription, gpu::Elem)> {
+    fn output_descriptions(&self) -> Vec<(TensorDescription, gpu::Elem, Variable)> {
         let mut outputs = Vec::new();
         let mut local_tensor_ids_input = Vec::new();
         let mut local_tensor_ids_output = Vec::new();
@@ -445,7 +447,7 @@ impl TraceBuilder {
         // All tensors where their latest description is read only should be written to since they
         // are going to be used after the fused kernel by other operations.
         for entry in self.tensors.values() {
-            let (tensor, _) = &entry;
+            let (tensor, _, _position) = &entry;
             if let TensorStatus::ReadOnly = tensor.status {
                 if self.output_to_local.contains_key(&tensor.id) {
                     outputs.push(entry.clone());
